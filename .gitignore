@@ -1,0 +1,8 @@
+/build/
+/.idea/
+/.gradle/
+/public/
+/.kotlin/
+.DS_Store
+detektConfig.yml.old
+detektConfig-old.yml
