@@ -1,0 +1,87 @@
+image: gradle:8.12-jdk11
+
+variables:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
+
+stages:
+  - build
+  - test
+  - analyse
+  - pages
+
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+
+default:
+  interruptible: true
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .gradle/caches
+      - .gradle/wrapper
+
+build:
+  stage: build
+  script:
+    - gradle clean build dokkaHtml -x test -x check
+  artifacts:
+    paths:
+      - public
+
+test:
+  stage: test
+  script:
+    - gradle verify check
+    - |
+      # line coverage from the report-level counter (last LINE counter in the kover xml)
+      echo "COVERAGE=$(grep -o 'type="LINE" missed="[0-9]*" covered="[0-9]*"' public/coverage/report.xml | tail -1 | awk -F'"' '{t=$4+$6; print (t ? int($6*100/t) : 0)}')" >> test.env
+      echo "JUNIT=$(grep -o 'percent">[0-9]*%' public/test/index.html | head -1 | tr -dc '0-9')" >> test.env
+    - cat test.env
+  artifacts:
+    reports:
+      dotenv: test.env
+    paths:
+      - public
+
+analyse:
+  stage: analyse
+  script:
+    - gradle detekt detektMain detektTest
+    - |
+      # first number matching $1 in file $2, 0 if none
+      num() { v=$(grep -o "$1" "$2" | head -1 | tr -dc '0-9' || true); echo ${v:-0}; }
+      for s in main test; do
+        f=public/detekt/$s.html
+        S=$(echo $s | tr a-z A-Z)
+        findings=$(num 'Total:[^0-9]*[0-9,]*' $f)
+        undocumented=$(grep -c -e 'missing documentation' -e 'missing required documentation' $f || true)
+        documentable=$(( $(num '[0-9,]* number of classes' $f) + $(num '[0-9,]* number of functions' $f) ))
+        echo "DETEKT_$S=$(( findings - undocumented ))" >> analyse.env
+        echo "DOC_COVERAGE_$S=$(( documentable ? (documentable - undocumented) * 100 / documentable : 100 ))" >> analyse.env
+      done
+    - cat analyse.env
+  artifacts:
+    reports:
+      dotenv: analyse.env
+    paths:
+      - public
+
+pages:
+  stage: pages
+  image: python:3.12-alpine
+  script:
+    - pip install anybadge
+    - mkdir -p public/badges
+    - anybadge --label='test coverage' --value=$COVERAGE --suffix='%' --file=public/badges/coverage.svg 50=red 80=orange 90=yellow 100=green
+    - anybadge --label='test success' --value=$JUNIT --suffix='%' --file=public/badges/junit.svg 90=red 95=orange 98=yellow 100=green
+    - anybadge --label='detekt main' --value=$DETEKT_MAIN --suffix=' warning(s)' --file=public/badges/detekt_main.svg 7=green 12=yellow 22=orange 999=red
+    - anybadge --label='detekt test' --value=$DETEKT_TEST --suffix=' warning(s)' --file=public/badges/detekt_test.svg 7=green 12=yellow 22=orange 999=red
+    - anybadge --label='doc main' --value=$DOC_COVERAGE_MAIN --suffix='% complete' --file=public/badges/doc_coverage_main.svg 50=red 85=orange 95=yellow 100=green
+    - anybadge --label='doc test' --value=$DOC_COVERAGE_TEST --suffix='% complete' --file=public/badges/doc_coverage_test.svg 50=red 85=orange 95=yellow 100=green
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  artifacts:
+    paths:
+      - public
